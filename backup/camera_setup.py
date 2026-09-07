@@ -24,7 +24,9 @@ cannot run while the MJPEG stream is holding the slot.
 THE TWO FIRMWARES SET UP DIFFERENTLY
 ------------------------------------
 CameraWebServer has the HTTP /control endpoint, so everything here works.
-The robot firmware (firmware/esp32cam_robot/) does not serve port 80 at
+Since the MJPEG switchover the robot firmware serves the same endpoints, so
+--source webserver now prepares either sketch. Only the legacy UDP video
+path (--source esp32) still bypasses this: on it
 all — its resolution is a UDP command instead (RobotLink.set_framesize)
 and its AWB cannot be locked from this end: updateCameraSettings() in the
 .ino re-enables set_whitebal/set_awb_gain every time. So on --source
@@ -106,7 +108,8 @@ def resolve_camera_ip(explicit_ip):
         print("No camera found. Check that:")
         print("  - the ESP32-CAM is powered and finished booting")
         print("  - it joined the same WiFi as this PC")
-        print("  - CameraWebServer.ino is the sketch that's flashed")
+        print("  - CameraWebServer.ino OR firmware/esp32cam_robot/ is flashed")
+        print("    (both serve the stream on port 81 now)")
         print("Otherwise read the IP off the Serial Monitor and pass --esp-ip.")
         return None
     if len(found) > 1:

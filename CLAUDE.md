@@ -35,7 +35,7 @@ python capture_esp32_samples.py --source webserver --esp-ip <ip>
 
 `backup/` takes the same `run.py` commands minus anything that drives.
 
-**Firmware**: Arduino IDE, board = AI-Thinker ESP32-CAM. The robot sketch allocates a 1 MB `tx_buffer` in PSRAM and reboots in a loop if that fails, so PSRAM has to be on — on this board it always is, and there is no PSRAM setting to tick. WiFi SSID/password are hardcoded at the top of every `.ino` and must be edited before flashing.
+**Firmware**: Arduino IDE, board = AI-Thinker ESP32-CAM. The robot sketch allocates a 1 MB `tx_buffer` in PSRAM and reboots in a loop if that fails, so PSRAM has to be on — on this board it always is, and there is no PSRAM setting to tick. **WiFi credentials are not in the repo.** `V2/firmware/esp32cam_robot/` reads them from `wifi_secrets.h`, which is gitignored — copy `wifi_secrets.example.h` to `wifi_secrets.h` and edit it before flashing. The `#if __has_include` guard means a missing file still compiles, it just joins `YOUR_WIFI_SSID`. Every other `.ino` in the repo (the archive folders) has `YOUR_WIFI_SSID` / `YOUR_WIFI_PASSWORD` placeholders to edit in place.
 
 **A firmware change can be compiled without a board**, which is worth doing before every handoff — the Arduino IDE ships `arduino-cli`:
 

@@ -18,6 +18,7 @@ at the resolution we asked for.
 """
 
 import time
+import json
 import urllib.request
 from urllib.parse import urlparse
 
@@ -56,6 +57,31 @@ def capture_frame(ip, timeout=HTTP_TIMEOUT):
     except Exception:
         return None
     return cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+
+def read_status(ip, timeout=HTTP_TIMEOUT):
+    """Fetch /status as a dict, or None if the board did not answer.
+
+    /status is ~1.4KB of JSON the board produces for free, served by a
+    SEPARATE httpd instance from the stream — so it still answers while
+    video is running, which is what makes live diagnosis possible."""
+    try:
+        with urllib.request.urlopen(f"{_base(ip)}/status", timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def is_robot_firmware(ip, timeout=HTTP_TIMEOUT):
+    """True if the board on `ip` is firmware/esp32cam_robot -- i.e. it has
+    motors -- rather than the stock CameraWebServer sketch.
+
+    Both now serve MJPEG on port 81, so the transport no longer tells you
+    which sketch is flashed. The robot firmware reports "robot":1 in
+    /status; the stock sketch has no such field. Anything that is about to
+    send drive commands has to ask, not assume."""
+    status = read_status(ip, timeout=timeout)
+    return bool(status and status.get("robot"))
 
 
 def _set_var(ip, var, val, timeout=HTTP_TIMEOUT):

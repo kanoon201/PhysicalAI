@@ -4,9 +4,13 @@ __pycache__/
 
 # Archives / snapshots
 *.zip
+*.rar
 
 # Editor / OS
 .vscode/
 .idea/
 Thumbs.db
 desktop.ini
+
+# WiFi credentials -- copy wifi_secrets.example.h and edit locally
+wifi_secrets.h

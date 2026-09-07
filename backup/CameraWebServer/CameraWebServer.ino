@@ -10,8 +10,8 @@
 // ===========================
 // Enter your WiFi credentials
 // ===========================
-const char *ssid = "aisfiber_2.4G";
-const char *password = "mam2012242";
+const char* ssid     = "KUWIN-IOT";
+const char* password = ""; // เว้นว่างไว้ ไม่ต้องใส่รหัสผ่าน
 
 void startCameraServer();
 void setupLedFlash();

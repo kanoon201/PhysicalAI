@@ -5,11 +5,18 @@ One place that decides which live-camera receiver to use, so every tool
 here (run.py, capture_esp32_samples.py) accepts the same --source values
 and they stay consistent.
 
-Two ESP32 firmwares are in play in this project and they stream in
-completely different ways:
+These two names pick a TRANSPORT, not a sketch:
 
-  --source esp32       sketch_jul13a.ino  -> JPEG over UDP (ports 44444/44442)
-  --source webserver   CameraWebServer    -> MJPEG over HTTP (port 81, /stream)
+  --source webserver   MJPEG over HTTP (port 81, /stream)
+  --source esp32       JPEG in UDP chunks (ports 44444/44442)
+
+firmware/esp32cam_robot/ speaks both and defaults to MJPEG, because TCP
+retransmits: a frame either arrives byte-exact or the socket stalls, and it
+can never arrive half-decoded the way a UDP frame with a missing chunk does.
+Its UDP path is kept as a fallback -- it is the only one that can find the PC
+by broadcast without being told an IP first. CameraWebServer speaks only
+MJPEG and has no motors, so --source webserver alone does not mean "can
+drive"; autodrive.py checks /status for the robot marker.
 
 Both hand back plain BGR frames, so whatever consumes them doesn't care
 which one is behind it. A full 'http://...' URL is also accepted and

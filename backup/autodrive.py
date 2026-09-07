@@ -66,6 +66,7 @@ from camera_setup import (FIRST_FRAME_TIMEOUT, FLIP_MODES, apply_flip,
                           flip_frame, prepare_camera)
 from cone_detection import ConeDetector, build_trackbars, print_saved, read_trackbars, save_config
 from lane_center import LaneFinder, draw_lane
+from camera_control import is_robot_firmware
 from robot_link import RobotLink
 from video_source import make_stream_source
 
@@ -104,8 +105,10 @@ def main():
     parser.add_argument("--esp-ip", default=None,
                         help="Robot IP. Optional for --source esp32 (it broadcast-discovers), "
                              "but REQUIRED to send control packets.")
-    parser.add_argument("--source", default="esp32",
-                        help="'esp32' (robot firmware, the only one that can drive) or 'webserver'")
+    parser.add_argument("--source", default="webserver",
+                        help="How video arrives: 'webserver' = MJPEG over HTTP (default, what "
+                             "the robot firmware now streams), 'esp32' = the legacy UDP chunk "
+                             "path. Either can drive; control always goes out over UDP.")
     parser.add_argument("--config", default="cone_config.json", help="Shared detector/lane/autopilot config")
     parser.add_argument("--dry-run", action="store_true",
                         help="Run the full loop and show what it would command, but send nothing")
@@ -133,10 +136,20 @@ def main():
         print("Pass --esp-ip <robot ip>, or --dry-run to test the vision loop with no robot.")
         return 1
 
+    # The transport no longer identifies the sketch. firmware/esp32cam_robot/
+    # serves MJPEG on port 81 exactly like CameraWebServer does, and MJPEG is
+    # now its default video path -- so "--source webserver" says nothing about
+    # whether there are motors on the other end. Ask the board instead: the
+    # robot firmware reports "robot":1 in /status, the stock sketch does not.
+    # Refusing on the transport alone would block the normal way to drive;
+    # trusting it would let a stock CameraWebServer board be armed.
     if args.source.lower() != "esp32" and not args.dry_run:
-        print(f"--source {args.source} cannot drive: only the robot firmware has motor control.")
-        print("Use --source esp32 (and flash firmware/esp32cam_robot/), or add --dry-run.")
-        return 1
+        if not is_robot_firmware(args.esp_ip):
+            print(f"{args.esp_ip} is not running the robot firmware "
+                  f"(no \"robot\" marker in /status), so it has no motors.")
+            print("Flash firmware/esp32cam_robot/, or add --dry-run to test vision only.")
+            return 1
+        print(f"Robot firmware confirmed at {args.esp_ip}; video over MJPEG, control over UDP.")
 
     detector = ConeDetector(config_path=args.config)
     lane = LaneFinder(detector.cfg)          # one shared config dict

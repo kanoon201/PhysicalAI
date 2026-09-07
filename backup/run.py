@@ -99,7 +99,9 @@ def run_bench(src, seconds):
 def main():
     parser = argparse.ArgumentParser(description="Find the ESP32-CAM, open its stream, show the live video, and optionally detect blue cones")
     parser.add_argument("--esp-ip", default=None, help="Camera IP. Omit to scan the local subnet for it.")
-    parser.add_argument("--source", default="webserver", help="'webserver' (CameraWebServer MJPEG) or 'esp32' (sketch_jul13a UDP)")
+    parser.add_argument("--source", default="webserver",
+                        help="Video transport: 'webserver' = MJPEG over HTTP (both sketches "
+                             "speak it), 'esp32' = the legacy UDP chunk path (robot firmware only)")
     parser.add_argument("--framesize", default="vga", choices=sorted(RESOLUTIONS),
                         help="Resolution to put the camera in (default vga)")
     parser.add_argument("--flip", default="none", choices=sorted(FLIP_MODES),

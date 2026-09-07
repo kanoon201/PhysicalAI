@@ -15,8 +15,16 @@ const char *hostName = "my-robot-cam";
 
 // --- 1. NETWORK & PORTS ---
 #define WIFICOUNT 1
-const char *ssids[WIFICOUNT] = {"aisfiber_2.4G"};
-const char *passs[WIFICOUNT] = {"mam2012242"};
+// Real credentials live in wifi_secrets.h, which is gitignored. Copy
+// wifi_secrets.example.h to wifi_secrets.h and edit it before flashing.
+#if __has_include("wifi_secrets.h")
+#include "wifi_secrets.h"
+#else
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+#endif
+const char *ssids[WIFICOUNT] = {WIFI_SSID};
+const char *passs[WIFICOUNT] = {WIFI_PASSWORD};
 
 // HTTP video, same layout as CameraWebServer: control on 80, stream on 81.
 // Two separate httpd instances on purpose -- /status still answers while

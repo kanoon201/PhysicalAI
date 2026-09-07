@@ -72,6 +72,10 @@ class MJPEGVideoSource:
         # framerate apart from a PC-limited one: divide by elapsed time and
         # compare against what the link can actually carry.
         self.bytes_received = 0
+        # How many times the stream had to be re-opened. A --bench run
+        # that looks slow but shows reconnects is a dropping link, not a
+        # camera that cannot produce frames.
+        self.reconnects = 0
         self._lock = threading.Lock()
         self._thread = None
 
@@ -102,6 +106,7 @@ class MJPEGVideoSource:
                 # Camera not up yet, wrong IP, or another client already
                 # holds the single available stream slot. Keep retrying so
                 # the tool survives a camera reboot mid-session.
+                self.reconnects += 1
                 print(f"[mjpeg] cannot open {self.url}: {e} (retrying)")
                 time.sleep(self.reconnect_delay)
                 continue
@@ -109,7 +114,17 @@ class MJPEGVideoSource:
             buf = b""
             try:
                 while self._running:
-                    chunk = stream.read(4096)
+                    # read1(), NOT read(). urlopen() hands back an
+                    # HTTPResponse wrapped in a BufferedReader, and
+                    # BufferedReader.read(n) blocks until it has all n bytes.
+                    # An MJPEG response has no overall Content-Length, so that
+                    # is the path taken: a JPEG that is already complete sits
+                    # unnoticed until ~4KB of the NEXT frame turns up, which
+                    # is exactly one frame interval of delay and makes frames
+                    # arrive in pairs. read1() returns whatever one underlying
+                    # read produced, so a finished frame is handed over the
+                    # moment it lands.
+                    chunk = stream.read1(4096)
                     if not chunk:
                         break  # stream ended — fall through and reconnect
                     buf += chunk

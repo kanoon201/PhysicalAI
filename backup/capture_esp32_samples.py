@@ -29,7 +29,9 @@ OUTPUT_DIR = "esp32_samples"
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--esp-ip", default=None, help="ESP32-CAM IP address. Required for --source webserver; optional for --source esp32 (omit to broadcast-discover instead)")
-    parser.add_argument("--source", default="esp32", help="'esp32' (sketch_jul13a UDP feed) or 'webserver' (CameraWebServer MJPEG feed)")
+    parser.add_argument("--source", default="webserver",
+                        help="Video transport: 'webserver' = MJPEG over HTTP (default; both "
+                             "sketches speak it), 'esp32' = the legacy UDP chunk path")
     parser.add_argument("--out", default=OUTPUT_DIR, help="Folder to save captured frames into")
     args = parser.parse_args()
 

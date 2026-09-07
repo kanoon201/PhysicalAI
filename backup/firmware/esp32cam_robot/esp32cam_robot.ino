@@ -8,13 +8,21 @@
 #include <WiFiUdp.h>
 #include <esp_log.h>
 #include <esp_task_wdt.h>
+#include "esp_http_server.h"
+#include "esp_timer.h"
 
 const char *hostName = "my-robot-cam";
 
 // --- 1. NETWORK & PORTS ---
 #define WIFICOUNT 1
-const char *ssids[WIFICOUNT] = {"aisfiber_2.4G"};
-const char *passs[WIFICOUNT] = {"mam2012242"};
+const char *ssids[WIFICOUNT] = {"YOUR_WIFI_SSID"};
+const char *passs[WIFICOUNT] = {"YOUR_WIFI_PASSWORD"};
+
+// HTTP video, same layout as CameraWebServer: control on 80, stream on 81.
+// Two separate httpd instances on purpose -- /status still answers while
+// the stream holds its slot, which is what makes live diagnosis possible.
+#define HTTP_CTRL_PORT 80
+#define HTTP_STREAM_PORT 81
 
 const int controlPort = 44441;
 const int videoPort = 44442;
@@ -67,6 +75,16 @@ volatile bool controlReset = true;
 volatile framesize_t current_framesize = FRAMESIZE_VGA;
 volatile int current_quality = 12;
 volatile int video_frame_interval = MIN_FRAME_INTERVAL; // Floor; tx_ready paces the rest
+
+// VIDEO TRANSPORT. MJPEG-over-TCP is the default: TCP retransmits, so a frame
+// either arrives byte-exact or the socket stalls -- it can never arrive
+// half-decoded, and there is no per-chunk loss for the adaptive loop to chase.
+// The UDP chunk path is kept as a fallback (cmd 9) because it is the only one
+// that can broadcast-discover the PC without knowing an IP first.
+volatile bool video_udp_mode = false;
+volatile bool http_streaming = false;
+httpd_handle_t camera_httpd = NULL;
+httpd_handle_t stream_httpd = NULL;
 
 // ==========================================
 // CAMERA INIT
@@ -176,6 +194,239 @@ void initCamera() {
 }
 
 // ==========================================
+// HTTP VIDEO SERVER (the CameraWebServer transport)
+// ==========================================
+// Byte-for-byte the same wire format CameraWebServer serves, so the PC side
+// needs no new receiver: mjpeg_video_source.py reads /stream on 81, and
+// camera_control.py drives /control, /capture and /status on 80 exactly as
+// it does against the stock sketch.
+
+#define STREAM_BOUNDARY_TOKEN "123456789000000000000987654321"
+static const char *STREAM_CONTENT_TYPE =
+    "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY_TOKEN;
+static const char *STREAM_BOUNDARY = "\r\n--" STREAM_BOUNDARY_TOKEN "\r\n";
+static const char *STREAM_PART =
+    "Content-Type: image/jpeg\r\nContent-Length: %u\r\nX-Timestamp: %d.%06d\r\n\r\n";
+
+static esp_err_t http_stream_handler(httpd_req_t *req) {
+  camera_fb_t *fb = NULL;
+  esp_err_t res = ESP_OK;
+  char part_buf[128];
+
+  res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
+  if (res != ESP_OK)
+    return res;
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  http_streaming = true;
+  Serial.println(" [HTTP] Stream client connected");
+
+  while (true) {
+    // An open stream IS contact with the PC. Without this the beacon
+    // watchdog in loopcommand() reboots the board every 120s whenever the PC
+    // is watching video over HTTP and never sends a UDP beacon.
+    lastServerContact = millis();
+
+    fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println(" [HTTP] Camera capture failed");
+      res = ESP_FAIL;
+      break;
+    }
+
+    if (res == ESP_OK)
+      res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
+    if (res == ESP_OK) {
+      size_t hlen = snprintf(part_buf, sizeof(part_buf), STREAM_PART,
+                             (unsigned)fb->len, (int)fb->timestamp.tv_sec,
+                             (int)fb->timestamp.tv_usec);
+      res = httpd_resp_send_chunk(req, part_buf, hlen);
+    }
+    if (res == ESP_OK)
+      res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+
+    esp_camera_fb_return(fb);
+    fb = NULL;
+
+    if (res != ESP_OK)
+      break; // client went away
+  }
+
+  http_streaming = false;
+  Serial.println(" [HTTP] Stream client gone");
+  return res;
+}
+
+static esp_err_t http_capture_handler(httpd_req_t *req) {
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+  return res;
+}
+
+static esp_err_t http_status_handler(httpd_req_t *req) {
+  sensor_t *s = esp_camera_sensor_get();
+  char buf[512];
+  // "robot":1 is the marker autodrive.py checks for: it says this board has
+  // motors, which the stock CameraWebServer sketch does not. Without it the
+  // PC has no way to tell the two firmwares apart over HTTP.
+  int n = snprintf(
+      buf, sizeof(buf),
+      "{\"robot\":1,\"video_mode\":\"%s\",\"framesize\":%d,\"quality\":%d,"
+      "\"awb\":%d,\"awb_gain\":%d,\"aec\":%d,\"aec2\":%d,\"agc\":%d,"
+      "\"ae_level\":%d,\"vflip\":%d,\"hmirror\":%d,\"special_effect\":%d,"
+      "\"rssi\":%d,\"pc_connected\":%d}",
+      video_udp_mode ? "udp" : "mjpeg", s ? (int)s->status.framesize : -1,
+      s ? s->status.quality : -1, s ? s->status.awb : -1,
+      s ? s->status.awb_gain : -1, s ? s->status.aec : -1,
+      s ? s->status.aec2 : -1, s ? s->status.agc : -1,
+      s ? s->status.ae_level : 0, s ? s->status.vflip : 0,
+      s ? s->status.hmirror : 0, s ? s->status.special_effect : 0, WiFi.RSSI(),
+      pcConnected ? 1 : 0);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  return httpd_resp_send(req, buf, n);
+}
+
+static esp_err_t http_control_handler(httpd_req_t *req) {
+  char query[128];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    httpd_resp_send_404(req);
+    return ESP_FAIL;
+  }
+  char var[32], val_s[32];
+  if (httpd_query_key_value(query, "var", var, sizeof(var)) != ESP_OK ||
+      httpd_query_key_value(query, "val", val_s, sizeof(val_s)) != ESP_OK) {
+    httpd_resp_send_404(req);
+    return ESP_FAIL;
+  }
+  int val = atoi(val_s);
+
+  sensor_t *s = esp_camera_sensor_get();
+  if (!s) {
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  int res = 0;
+
+  // framesize and quality are mirrored into the globals so the UDP fallback
+  // and updateCameraSettings() stay in step with whatever HTTP just set.
+  if (!strcmp(var, "framesize")) {
+    current_framesize = (framesize_t)val;
+    res = s->set_framesize(s, (framesize_t)val);
+  } else if (!strcmp(var, "quality")) {
+    current_quality = val;
+    res = s->set_quality(s, val);
+  } else if (!strcmp(var, "contrast"))
+    res = s->set_contrast(s, val);
+  else if (!strcmp(var, "brightness"))
+    res = s->set_brightness(s, val);
+  else if (!strcmp(var, "saturation"))
+    res = s->set_saturation(s, val);
+  else if (!strcmp(var, "gainceiling"))
+    res = s->set_gainceiling(s, (gainceiling_t)val);
+  else if (!strcmp(var, "colorbar"))
+    res = s->set_colorbar(s, val);
+  else if (!strcmp(var, "awb"))
+    res = s->set_whitebal(s, val);
+  else if (!strcmp(var, "agc"))
+    res = s->set_gain_ctrl(s, val);
+  else if (!strcmp(var, "aec"))
+    res = s->set_exposure_ctrl(s, val);
+  else if (!strcmp(var, "hmirror"))
+    res = s->set_hmirror(s, val);
+  else if (!strcmp(var, "vflip"))
+    res = s->set_vflip(s, val);
+  else if (!strcmp(var, "awb_gain"))
+    res = s->set_awb_gain(s, val);
+  else if (!strcmp(var, "agc_gain"))
+    res = s->set_agc_gain(s, val);
+  else if (!strcmp(var, "aec_value"))
+    res = s->set_aec_value(s, val);
+  else if (!strcmp(var, "aec2"))
+    res = s->set_aec2(s, val);
+  else if (!strcmp(var, "dcw"))
+    res = s->set_dcw(s, val);
+  else if (!strcmp(var, "bpc"))
+    res = s->set_bpc(s, val);
+  else if (!strcmp(var, "wpc"))
+    res = s->set_wpc(s, val);
+  else if (!strcmp(var, "raw_gma"))
+    res = s->set_raw_gma(s, val);
+  else if (!strcmp(var, "lenc"))
+    res = s->set_lenc(s, val);
+  else if (!strcmp(var, "special_effect"))
+    res = s->set_special_effect(s, val);
+  else if (!strcmp(var, "wb_mode"))
+    res = s->set_wb_mode(s, val);
+  else if (!strcmp(var, "ae_level"))
+    res = s->set_ae_level(s, val);
+  else if (!strcmp(var, "video_mode")) {
+    // 0 = MJPEG over HTTP (default), 1 = UDP chunks. Same switch as UDP cmd 8/9.
+    video_udp_mode = (val != 0);
+    Serial.printf(" [Video] transport -> %s (via HTTP)\n",
+                  video_udp_mode ? "UDP" : "MJPEG");
+  } else if (!strcmp(var, "restart")) {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, NULL, 0);
+    delay(200);
+    ESP.restart();
+  } else {
+    httpd_resp_send_404(req);
+    return ESP_FAIL;
+  }
+
+  if (res < 0) {
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  return httpd_resp_send(req, NULL, 0);
+}
+
+void startCameraServer() {
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.max_uri_handlers = 8;
+  config.stack_size = 8192;
+
+  httpd_uri_t status_uri = {"/status", HTTP_GET, http_status_handler, NULL};
+  httpd_uri_t control_uri = {"/control", HTTP_GET, http_control_handler, NULL};
+  httpd_uri_t capture_uri = {"/capture", HTTP_GET, http_capture_handler, NULL};
+  httpd_uri_t stream_uri = {"/stream", HTTP_GET, http_stream_handler, NULL};
+
+  config.server_port = HTTP_CTRL_PORT;
+  config.ctrl_port = 32768;
+  if (httpd_start(&camera_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(camera_httpd, &status_uri);
+    httpd_register_uri_handler(camera_httpd, &control_uri);
+    httpd_register_uri_handler(camera_httpd, &capture_uri);
+    Serial.printf(" [HTTP] control server on port %d\n", HTTP_CTRL_PORT);
+  } else {
+    Serial.println(" [HTTP] control server FAILED to start");
+  }
+
+  // A second httpd instance, not a second URI on the first one: the stream
+  // handler never returns while a client is attached, and would otherwise
+  // block /status and /control for as long as video is running.
+  config.server_port = HTTP_STREAM_PORT;
+  config.ctrl_port = 32769;
+  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(stream_httpd, &stream_uri);
+    Serial.printf(" [HTTP] stream server on port %d/stream\n",
+                  HTTP_STREAM_PORT);
+  } else {
+    Serial.println(" [HTTP] stream server FAILED to start");
+  }
+}
+
+// ==========================================
 // TASKS: VIDEO STREAM (PSRAM Double-Buffered)
 // ==========================================
 uint8_t *tx_buffer = NULL;
@@ -191,6 +442,16 @@ void cameraDrainTask(void *pvParameters) {
   while (true) {
     esp_task_wdt_reset();
     if (!CAMCONFIG) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    // MJPEG mode: the httpd stream handler owns the camera. Grabbing frames
+    // here as well would fight it over the two frame buffers and burn core 0
+    // -- the core the WiFi stack runs on -- producing pictures nobody sends.
+    // This also keeps the sensor power-down below out of the way: it keys on
+    // the UDP beacon, which an HTTP-only client never sends.
+    if (!video_udp_mode) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
@@ -259,6 +520,12 @@ void streamTXTask(void *pvParameters) {
   
   while (true) {
     esp_task_wdt_reset();
+
+    if (!video_udp_mode) {
+      tx_ready = false;
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
 
     if (!tx_ready) {
       vTaskDelay(pdMS_TO_TICKS(5));
@@ -380,8 +647,12 @@ void loopcommand(void *pvParameters) {
       int discLen = udpDiscover.read(discBuf, sizeof(discBuf) - 1);
       if (discLen > 0) {
         discBuf[discLen] = '\0';
+        // Only the UDP path can lose part of a frame, so only the UDP path
+        // has a delivery figure worth reacting to. Over TCP the PC always
+        // reports ~100%, and letting that run would walk the quality down to
+        // 10 and hand the radio bigger frames than it can carry.
         char *deliveryStr = strstr(discBuf, "delivery:");
-        if (deliveryStr) {
+        if (deliveryStr && video_udp_mode) {
           int delivery = atoi(deliveryStr + 9);
           static int low_delivery_count = 0;
           static int high_delivery_count = 0;
@@ -466,6 +737,13 @@ void loopcommand(void *pvParameters) {
               current_framesize = FRAMESIZE_SVGA;
               current_quality = 11;
               updateCameraSettings();
+            } else if (cmd == 8 && v1 == 8 && v2 == 8) {
+              Serial.println("COMMAND: VIDEO -> MJPEG over HTTP (port 81)");
+              video_udp_mode = false;
+              tx_ready = false;
+            } else if (cmd == 9 && v1 == 9 && v2 == 9) {
+              Serial.println("COMMAND: VIDEO -> UDP chunks (port 44442)");
+              video_udp_mode = true;
             } else if (cmd == 7 && v1 == 7 && v2 == 7) {
               Serial.println("COMMAND: R - MAX  : XGA 1024x768 q14 (low fps)");
               current_framesize = FRAMESIZE_XGA;
@@ -575,6 +853,10 @@ void setup() {
 
   Serial.print("Local IP Address: ");
   Serial.println(WiFi.localIP());
+
+  startCameraServer();
+  Serial.printf(" [Video] transport at boot: %s\n",
+                video_udp_mode ? "UDP chunks" : "MJPEG over HTTP");
 
   esp_task_wdt_config_t twdt_config = {
       .timeout_ms = WATCHDOG_TIMEOUT_S * 1000,

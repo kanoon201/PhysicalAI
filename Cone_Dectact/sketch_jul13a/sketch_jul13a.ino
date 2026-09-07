@@ -13,8 +13,8 @@ const char *hostName = "my-robot-cam";
 
 // --- 1. NETWORK & PORTS ---
 #define WIFICOUNT 1
-const char *ssids[WIFICOUNT] = {"iPhone kanoon"};
-const char *passs[WIFICOUNT] = {"WTZ.0963519554"};
+const char *ssids[WIFICOUNT] = {"YOUR_WIFI_SSID"};
+const char *passs[WIFICOUNT] = {"YOUR_WIFI_PASSWORD"};
 
 const int controlPort = 44441;
 const int videoPort = 44442;
