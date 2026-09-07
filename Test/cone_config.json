@@ -1,0 +1,34 @@
+{
+  "hsv_range1_lower": [
+    12,
+    0,
+    59
+  ],
+  "hsv_range1_upper": [
+    101,
+    206,
+    255
+  ],
+  "hsv_range2_lower": [
+    0,
+    0,
+    0
+  ],
+  "hsv_range2_upper": [
+    0,
+    0,
+    0
+  ],
+  "use_range2": false,
+  "min_contour_area": 150,
+  "max_contour_area": 50000,
+  "min_aspect_ratio": 0.2,
+  "max_aspect_ratio": 1.3,
+  "steer_gain": 1.2,
+  "steer_deadzone_px": 15,
+  "max_steer": 1.0,
+  "base_throttle": 0.35,
+  "slow_down_no_cone_frames": 5,
+  "single_side_offset_ratio": 0.35,
+  "morph_kernel_size": 5
+}

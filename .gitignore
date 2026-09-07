@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Archives / snapshots
+*.zip
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
