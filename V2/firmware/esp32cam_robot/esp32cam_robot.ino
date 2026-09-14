@@ -78,6 +78,9 @@ WiFiUDP udpDiscover;
 volatile int previous1A = 0;
 volatile int previous1B = 0;
 volatile int oldlight = 0;
+// Set once the browser page drives the light, so loop() stops
+// overwriting it with the "no beacon" blink.
+volatile bool light_override = false;
 volatile bool CAMCONFIG = false;
 volatile bool controlReset = true;
 volatile framesize_t current_framesize = FRAMESIZE_VGA;
@@ -281,7 +284,7 @@ static esp_err_t http_capture_handler(httpd_req_t *req) {
 
 static esp_err_t http_status_handler(httpd_req_t *req) {
   sensor_t *s = esp_camera_sensor_get();
-  char buf[512];
+  char buf[768];
   // "robot":1 is the marker autodrive.py checks for: it says this board has
   // motors, which the stock CameraWebServer sketch does not. Without it the
   // PC has no way to tell the two firmwares apart over HTTP.
@@ -290,13 +293,18 @@ static esp_err_t http_status_handler(httpd_req_t *req) {
       "{\"robot\":1,\"video_mode\":\"%s\",\"framesize\":%d,\"quality\":%d,"
       "\"awb\":%d,\"awb_gain\":%d,\"aec\":%d,\"aec2\":%d,\"agc\":%d,"
       "\"ae_level\":%d,\"vflip\":%d,\"hmirror\":%d,\"special_effect\":%d,"
+      "\"brightness\":%d,\"contrast\":%d,\"saturation\":%d,"
+      "\"lenc\":%d,\"raw_gma\":%d,\"dcw\":%d,\"light\":%d,"
       "\"rssi\":%d,\"pc_connected\":%d}",
       video_udp_mode ? "udp" : "mjpeg", s ? (int)s->status.framesize : -1,
       s ? s->status.quality : -1, s ? s->status.awb : -1,
       s ? s->status.awb_gain : -1, s ? s->status.aec : -1,
       s ? s->status.aec2 : -1, s ? s->status.agc : -1,
       s ? s->status.ae_level : 0, s ? s->status.vflip : 0,
-      s ? s->status.hmirror : 0, s ? s->status.special_effect : 0, WiFi.RSSI(),
+      s ? s->status.hmirror : 0, s ? s->status.special_effect : 0,
+      s ? s->status.brightness : 0, s ? s->status.contrast : 0,
+      s ? s->status.saturation : 0, s ? s->status.lenc : 0,
+      s ? s->status.raw_gma : 0, s ? s->status.dcw : 0, oldlight, WiFi.RSSI(),
       pcConnected ? 1 : 0);
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -376,7 +384,19 @@ static esp_err_t http_control_handler(httpd_req_t *req) {
     res = s->set_wb_mode(s, val);
   else if (!strcmp(var, "ae_level"))
     res = s->set_ae_level(s, val);
-  else if (!strcmp(var, "video_mode")) {
+  else if (!strcmp(var, "light")) {
+    // The flash LED is on GPIO4 and PWM_RES is 16-bit, so full scale is 65535.
+    // The browser page caps its slider well below that: this LED is bright
+    // enough to pull the 5V rail down, and a browning-out radio is the first
+    // thing that breaks on this board.
+    if (val < 0) val = 0;
+    if (val > 65535) val = 65535;
+    oldlight = val;
+    // Without this, loop() keeps blinking the "no beacon" heartbeat over the
+    // value we just set -- an HTTP-only client never sets pcConnected.
+    light_override = true;
+    ledcWrite(LED_PIN, oldlight);
+  } else if (!strcmp(var, "video_mode")) {
     // 0 = MJPEG over HTTP (default), 1 = UDP chunks. Same switch as UDP cmd 8/9.
     video_udp_mode = (val != 0);
     Serial.printf(" [Video] transport -> %s (via HTTP)\n",
@@ -399,11 +419,208 @@ static esp_err_t http_control_handler(httpd_req_t *req) {
   return httpd_resp_send(req, NULL, 0);
 }
 
+// ==========================================
+// HTTP INDEX PAGE (browser UI on port 80)
+// ==========================================
+// Served from "/" so the board can be opened in a browser the way
+// CameraWebServer can, without pulling in that sketch's ~20 KB gzipped
+// camera_index.h. The page is split in two halves so the framesize <option>
+// values can be emitted between them from the real framesize_t constants:
+// `val` in /control?var=framesize is a raw enum index, and the esp32 core has
+// inserted new entries into that enum before (128X128, 320X320), which is
+// exactly how hardcoded indices go stale.
+//
+// Motor control is deliberately NOT on this page. /control has no auth, and a
+// browser widget that drives the car would let anyone on the network do the
+// same. Driving stays on the UDP command port, where autodrive.py's arming
+// gate is.
+
+static const char INDEX_HTML_HEAD[] PROGMEM = R"rawliteral(
+<title>ESP32-CAM Robot</title>
+<style>
+:root{--bg:#12141a;--panel:#1b1e26;--line:#2b3040;--fg:#e6e8ee;--dim:#8b93a7;--accent:#4da3ff;--warn:#ffb454}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+h1{margin:0;font-size:16px;font-weight:600}
+.tag{font-size:12px;color:var(--dim)}
+.wrap{display:flex;gap:16px;padding:16px;align-items:flex-start;flex-wrap:wrap}
+.video{flex:1 1 420px;min-width:300px}
+.side{flex:0 1 320px;min-width:280px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+.panel h2{margin:0 0 10px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:600}
+#stream{width:100%;display:block;border-radius:10px;background:#000;min-height:180px}
+.row{display:flex;align-items:center;gap:8px;margin:7px 0}
+.row label{flex:0 0 96px;color:var(--dim);font-size:13px}
+.row input[type=range]{flex:1;min-width:0}
+.row select{flex:1;min-width:0;background:#12151c;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px}
+.val{flex:0 0 46px;text-align:right;font-variant-numeric:tabular-nums;color:var(--accent)}
+button{background:#252a36;color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:8px 12px;cursor:pointer;font:inherit}
+button:hover{border-color:var(--accent)}
+button.on{background:var(--accent);color:#0b0d12;border-color:var(--accent)}
+button.danger:hover{border-color:#ff6b6b;color:#ff6b6b}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.toggles{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px;margin-top:10px}
+.toggles button{padding:6px;font-size:12px}
+.note{background:#241f14;border:1px solid #4a3a1a;color:var(--warn);border-radius:8px;padding:9px 11px;font-size:12.5px;margin:0 16px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+td{padding:3px 0;color:var(--dim)}
+td:last-child{text-align:right;color:var(--fg);font-variant-numeric:tabular-nums}
+</style>
+<header>
+  <h1>ESP32-CAM Robot</h1>
+  <span class="tag" id="host"></span>
+  <span class="tag" id="fpsTag">-- fps</span>
+</header>
+<p class="note">The camera serves <b>one stream client at a time</b>. Press Stop (or close this tab) before running <code>run.py</code> / <code>autodrive.py</code>, or Python gets no frames.</p>
+<div class="wrap">
+  <div class="video">
+    <img id="stream" alt="stream stopped">
+    <div class="btns" style="margin-top:8px">
+      <button id="btnStart" class="on">Start stream</button>
+      <button id="btnStop">Stop stream</button>
+      <button id="btnSnap">Snapshot</button>
+    </div>
+  </div>
+  <div class="side">
+    <div class="panel">
+      <h2>Picture</h2>
+      <div class="row"><label>Resolution</label><select id="framesize"></select></div>
+      <div class="row"><label>Quality</label><input type="range" id="quality" min="10" max="63"><span class="val" id="qualityV"></span></div>
+      <div class="row"><label>AE level</label><input type="range" id="ae_level" min="-2" max="2"><span class="val" id="ae_levelV"></span></div>
+      <div class="row"><label>Brightness</label><input type="range" id="brightness" min="-2" max="2"><span class="val" id="brightnessV"></span></div>
+      <div class="row"><label>Contrast</label><input type="range" id="contrast" min="-2" max="2"><span class="val" id="contrastV"></span></div>
+      <div class="row"><label>Saturation</label><input type="range" id="saturation" min="-2" max="2"><span class="val" id="saturationV"></span></div>
+      <div class="toggles" id="toggles"></div>
+    </div>
+    <div class="panel">
+      <h2>Robot</h2>
+      <div class="row"><label>Light</label><input type="range" id="light" min="0" max="16000" step="250" value="0"><span class="val" id="lightV">0</span></div>
+      <div class="row"><label>Transport</label><select id="video_mode"><option value="0">MJPEG / HTTP</option><option value="1">UDP chunks</option></select></div>
+      <div class="btns"><button id="btnRestart" class="danger">Restart board</button></div>
+    </div>
+    <div class="panel">
+      <h2>Status</h2>
+      <table id="statusTable"></table>
+    </div>
+  </div>
+</div>
+)rawliteral";
+
+static const char INDEX_HTML_TAIL[] PROGMEM = R"rawliteral(
+<script>
+var $=function(id){return document.getElementById(id)};
+var host=location.hostname, ctrl='http://'+host, streamURL='http://'+host+':81/stream';
+$('host').textContent=host;
+
+function set(v,val){return fetch(ctrl+'/control?var='+v+'&val='+val).catch(function(){})}
+
+// The resolution list comes from FS, which the firmware emits from the real
+// framesize_t constants. Hardcoding the indices breaks whenever the esp32
+// core inserts a new entry into that enum -- it has done so before.
+var sel=$('framesize');
+FS.forEach(function(f){var o=document.createElement('option');o.value=f[0];o.textContent=f[1];sel.appendChild(o)});
+sel.onchange=function(){set('framesize',sel.value)};
+$('video_mode').onchange=function(){set('video_mode',$('video_mode').value)};
+
+['quality','ae_level','brightness','contrast','saturation'].forEach(function(v){
+  var el=$(v);
+  el.oninput=function(){$(v+'V').textContent=el.value};
+  el.onchange=function(){set(v,el.value)};
+});
+var lt=$('light');
+lt.oninput=function(){$('lightV').textContent=lt.value};
+lt.onchange=function(){set('light',lt.value)};
+
+var TOGGLES=[['awb','AWB'],['awb_gain','AWB gain'],['aec','AEC'],['aec2','AEC2'],['agc','AGC'],
+             ['vflip','V-Flip'],['hmirror','H-Mirror'],['lenc','Lens corr'],['raw_gma','Gamma'],['dcw','DCW']];
+var tgEl={};
+TOGGLES.forEach(function(t){
+  var b=document.createElement('button');
+  b.textContent=t[1]; b.dataset.v='0';
+  b.onclick=function(){var nv=(b.dataset.v==='1')?0:1; set(t[0],nv).then(function(){mark(b,nv)})};
+  $('toggles').appendChild(b); tgEl[t[0]]=b;
+});
+function mark(b,v){b.dataset.v=v?'1':'0'; b.classList.toggle('on',!!v)}
+
+var img=$('stream'), running=false;
+function start(){
+  if(running)return;
+  running=true; img.src=streamURL+'?t='+Date.now();
+  $('btnStart').classList.add('on'); $('btnStop').classList.remove('on');
+}
+function stop(){
+  running=false; img.removeAttribute('src'); img.alt='stream stopped';
+  $('btnStart').classList.remove('on'); $('btnStop').classList.add('on');
+  $('fpsTag').textContent='-- fps';
+}
+$('btnStart').onclick=start;
+$('btnStop').onclick=stop;
+$('btnSnap').onclick=function(){window.open(ctrl+'/capture?t='+Date.now(),'_blank')};
+$('btnRestart').onclick=function(){if(confirm('Restart the board?'))set('restart',1)};
+// Dropping the stream on unload frees the single client slot immediately, so
+// run.py can connect right after the tab closes instead of waiting for a
+// TCP timeout.
+window.addEventListener('pagehide',stop);
+
+// fps from the img load events: one fires per MJPEG part.
+var fc=0, ft=Date.now();
+img.addEventListener('load',function(){
+  fc++;
+  var d=(Date.now()-ft)/1000;
+  if(d>=2){$('fpsTag').textContent=(fc/d).toFixed(1)+' fps'; fc=0; ft=Date.now()}
+});
+
+var ROWS=[['framesize','Framesize'],['quality','Quality'],['video_mode','Transport'],
+          ['rssi','RSSI (dBm)'],['pc_connected','UDP beacon'],['robot','Robot firmware']];
+function refresh(){
+  fetch(ctrl+'/status').then(function(r){return r.json()}).then(function(s){
+    var h='';
+    ROWS.forEach(function(r){if(s[r[0]]!==undefined)h+='<tr><td>'+r[1]+'</td><td>'+s[r[0]]+'</td></tr>'});
+    $('statusTable').innerHTML=h;
+    ['quality','ae_level','brightness','contrast','saturation'].forEach(function(v){
+      if(s[v]!==undefined&&document.activeElement!==$(v)){$(v).value=s[v]; $(v+'V').textContent=s[v]}
+    });
+    if(s.framesize!==undefined&&document.activeElement!==sel)sel.value=s.framesize;
+    if(s.video_mode!==undefined)$('video_mode').value=(s.video_mode==='udp')?'1':'0';
+    TOGGLES.forEach(function(t){if(s[t[0]]!==undefined)mark(tgEl[t[0]],s[t[0]])});
+  }).catch(function(){});
+}
+refresh();
+setInterval(refresh,2000);
+start();
+</script>
+)rawliteral";
+
+static esp_err_t http_index_handler(httpd_req_t *req) {
+  char fs[192];
+  int n = snprintf(fs, sizeof(fs),
+                   "<script>var FS=[[%d,'QVGA 320x240'],[%d,'CIF 400x296'],"
+                   "[%d,'VGA 640x480'],[%d,'SVGA 800x600'],[%d,'XGA 1024x768']];"
+                   "</script>",
+                   (int)FRAMESIZE_QVGA, (int)FRAMESIZE_CIF, (int)FRAMESIZE_VGA,
+                   (int)FRAMESIZE_SVGA, (int)FRAMESIZE_XGA);
+
+  httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_hdr(req, "Content-Encoding", "identity");
+  esp_err_t res = httpd_resp_send_chunk(req, INDEX_HTML_HEAD,
+                                        strlen_P(INDEX_HTML_HEAD));
+  if (res == ESP_OK)
+    res = httpd_resp_send_chunk(req, fs, n);
+  if (res == ESP_OK)
+    res = httpd_resp_send_chunk(req, INDEX_HTML_TAIL,
+                                strlen_P(INDEX_HTML_TAIL));
+  if (res == ESP_OK)
+    res = httpd_resp_send_chunk(req, NULL, 0); // end of response
+  return res;
+}
+
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 8;
   config.stack_size = 8192;
 
+  httpd_uri_t index_uri = {"/", HTTP_GET, http_index_handler, NULL};
   httpd_uri_t status_uri = {"/status", HTTP_GET, http_status_handler, NULL};
   httpd_uri_t control_uri = {"/control", HTTP_GET, http_control_handler, NULL};
   httpd_uri_t capture_uri = {"/capture", HTTP_GET, http_capture_handler, NULL};
@@ -412,6 +629,7 @@ void startCameraServer() {
   config.server_port = HTTP_CTRL_PORT;
   config.ctrl_port = 32768;
   if (httpd_start(&camera_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(camera_httpd, &index_uri);
     httpd_register_uri_handler(camera_httpd, &status_uri);
     httpd_register_uri_handler(camera_httpd, &control_uri);
     httpd_register_uri_handler(camera_httpd, &capture_uri);
@@ -893,7 +1111,7 @@ void setup() {
 }
 
 void loop() {
-  if (!pcConnected) {
+  if (!pcConnected && !light_override) {
     static bool state = 0;
     ledcWrite(LED_PIN, state ? 50 : 0);
     state = !state;
