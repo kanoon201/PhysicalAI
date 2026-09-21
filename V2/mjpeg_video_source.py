@@ -30,6 +30,7 @@ frames will arrive.
 """
 
 import argparse
+import collections
 import threading
 import time
 import urllib.request
@@ -76,6 +77,11 @@ class MJPEGVideoSource:
         # that looks slow but shows reconnects is a dropping link, not a
         # camera that cannot produce frames.
         self.reconnects = 0
+        # perf_counter() of each accepted frame, newest last. Stutter is a
+        # frame-SPACING problem that average fps hides completely, and this
+        # is the only place the spacing can be measured without a polling
+        # loop whose own sleep granularity (15 ms on Windows) blurs it.
+        self.arrival_times = collections.deque(maxlen=4096)
         self._lock = threading.Lock()
         self._thread = None
 
@@ -148,6 +154,7 @@ class MJPEGVideoSource:
                                 self._latest_frame = frame
                                 self._frame_count += 1
                                 self.bytes_received += len(jpg)
+                                self.arrival_times.append(time.perf_counter())
 
                     if len(buf) > self.max_buffer:
                         buf = b""

@@ -24,9 +24,9 @@
   "center_deadzone_px": 15,
   "steer_gain": 0.8,
   "max_steer": 1.0,
-  "base_throttle": 0.35,
+  "base_throttle": 0.3,
   "turn_slowdown": 0.5,
-  "throttle_ramp_per_s": 1.0,
+  "throttle_ramp_per_s": 0.3,
   "stop_after_lost_frames": 5,
   "one_side_throttle_scale": 0.7
 }

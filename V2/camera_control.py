@@ -84,6 +84,26 @@ def is_robot_firmware(ip, timeout=HTTP_TIMEOUT):
     return bool(status and status.get("robot"))
 
 
+def robot_firmware_check(ip, wait=20.0, timeout=HTTP_TIMEOUT):
+    """Like is_robot_firmware(), but tells "no answer" apart from "answered
+    without the marker", and keeps asking for up to `wait` seconds.
+
+    The robot firmware reboots itself 120 s after the last contact, so a
+    board that was fine a minute ago can be mid-boot for a few seconds
+    exactly when the next run starts. One unanswered /status is not "not
+    the robot firmware" — it is "ask again".
+
+    Returns "robot", "stock" (answered, no marker) or "silent"."""
+    deadline = time.time() + wait
+    while True:
+        status = read_status(ip, timeout=timeout)
+        if status is not None:
+            return "robot" if status.get("robot") else "stock"
+        if time.time() >= deadline:
+            return "silent"
+        time.sleep(1.0)
+
+
 def _set_var(ip, var, val, timeout=HTTP_TIMEOUT):
     try:
         with urllib.request.urlopen(f"{_base(ip)}/control?var={var}&val={val}",

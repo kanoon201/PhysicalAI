@@ -66,7 +66,7 @@ from camera_setup import (FIRST_FRAME_TIMEOUT, FLIP_MODES, apply_flip,
                           flip_frame, prepare_camera)
 from cone_detection import ConeDetector, build_trackbars, print_saved, read_trackbars, save_config
 from lane_center import LaneFinder, draw_lane
-from camera_control import is_robot_firmware
+from camera_control import robot_firmware_check
 from robot_link import RobotLink
 from video_source import make_stream_source
 
@@ -144,10 +144,16 @@ def main():
     # Refusing on the transport alone would block the normal way to drive;
     # trusting it would let a stock CameraWebServer board be armed.
     if args.source.lower() != "esp32" and not args.dry_run:
-        if not is_robot_firmware(args.esp_ip):
+        verdict = robot_firmware_check(args.esp_ip)
+        if verdict == "stock":
             print(f"{args.esp_ip} is not running the robot firmware "
                   f"(no \"robot\" marker in /status), so it has no motors.")
             print("Flash firmware/esp32cam_robot/, or add --dry-run to test vision only.")
+            return 1
+        if verdict == "silent":
+            print(f"{args.esp_ip} did not answer /status for 20s. Wrong IP, board off, "
+                  "or it rebooted onto a new DHCP lease (it does that 120s after the "
+                  "last contact) — run esp32_link_check.py.")
             return 1
         print(f"Robot firmware confirmed at {args.esp_ip}; video over MJPEG, control over UDP.")
 
