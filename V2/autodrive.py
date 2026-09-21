@@ -66,7 +66,7 @@ from camera_setup import (FIRST_FRAME_TIMEOUT, FLIP_MODES, apply_flip,
                           flip_frame, prepare_camera)
 from cone_detection import ConeDetector, build_trackbars, print_saved, read_trackbars, save_config
 from lane_center import LaneFinder, draw_lane
-from camera_control import robot_firmware_check
+from camera_control import is_robot_firmware
 from robot_link import RobotLink
 from video_source import make_stream_source
 
@@ -144,16 +144,10 @@ def main():
     # Refusing on the transport alone would block the normal way to drive;
     # trusting it would let a stock CameraWebServer board be armed.
     if args.source.lower() != "esp32" and not args.dry_run:
-        verdict = robot_firmware_check(args.esp_ip)
-        if verdict == "stock":
+        if not is_robot_firmware(args.esp_ip):
             print(f"{args.esp_ip} is not running the robot firmware "
                   f"(no \"robot\" marker in /status), so it has no motors.")
             print("Flash firmware/esp32cam_robot/, or add --dry-run to test vision only.")
-            return 1
-        if verdict == "silent":
-            print(f"{args.esp_ip} did not answer /status for 20s. Wrong IP, board off, "
-                  "or it rebooted onto a new DHCP lease (it does that 120s after the "
-                  "last contact) — run esp32_link_check.py.")
             return 1
         print(f"Robot firmware confirmed at {args.esp_ip}; video over MJPEG, control over UDP.")
 
@@ -264,8 +258,11 @@ def main():
                 # a packet on the wire every 50 ms, which is what keeps the
                 # firmware's 150 ms motor failsafe from tripping when the
                 # video is slower than that.
-                if armed and link:
-                    link.drive(steer, throttle)
+                if link:
+                    if armed:
+                        link.drive(steer, throttle)
+                    else:
+                        link.drive(0.0, 0.0)
 
                 if armed and seen_first_frame and (now - last_frame_at) > args.stale_timeout:
                     armed = False
@@ -324,6 +321,15 @@ def main():
                 steer, throttle, reason = autopilot.update(lane_result, dt)
                 reason = f"{reason} (disarmed)"
                 autopilot.reset()
+                # Keep the ESC fed with a NEUTRAL pulse while disarmed. If
+                # nothing is sent, the firmware's 150 ms failsafe drops the
+                # PWM to zero (no pulse at all), the ESC loses its signal,
+                # and when we arm it sees 1650 us out of nowhere and refuses
+                # to run -- RC ESCs only arm after seeing neutral (1500 us)
+                # first. The pygame controller always sent neutral while
+                # idle, which is why it drove and this did not.
+                if link:
+                    link.drive(0.0, 0.0)
 
             draw_hud(display, armed, steer, throttle, reason, args.dry_run, fps)
             cv2.imshow(WINDOW, display)

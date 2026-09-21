@@ -258,8 +258,11 @@ def main():
                 # a packet on the wire every 50 ms, which is what keeps the
                 # firmware's 150 ms motor failsafe from tripping when the
                 # video is slower than that.
-                if armed and link:
-                    link.drive(steer, throttle)
+                if link:
+                    if armed:
+                        link.drive(steer, throttle)
+                    else:
+                        link.drive(0.0, 0.0)
 
                 if armed and seen_first_frame and (now - last_frame_at) > args.stale_timeout:
                     armed = False
@@ -318,6 +321,15 @@ def main():
                 steer, throttle, reason = autopilot.update(lane_result, dt)
                 reason = f"{reason} (disarmed)"
                 autopilot.reset()
+                # Keep the ESC fed with a NEUTRAL pulse while disarmed. If
+                # nothing is sent, the firmware's 150 ms failsafe drops the
+                # PWM to zero (no pulse at all), the ESC loses its signal,
+                # and when we arm it sees 1650 us out of nowhere and refuses
+                # to run -- RC ESCs only arm after seeing neutral (1500 us)
+                # first. The pygame controller always sent neutral while
+                # idle, which is why it drove and this did not.
+                if link:
+                    link.drive(0.0, 0.0)
 
             draw_hud(display, armed, steer, throttle, reason, args.dry_run, fps)
             cv2.imshow(WINDOW, display)
