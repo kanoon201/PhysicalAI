@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Secrets (copy wifi_secrets.example.h -> wifi_secrets.h locally)
+wifi_secrets.h
+
+# Backups / editor / OS junk
+*.bak
+*.orig
+*.swp
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Arduino / PlatformIO build output
+build/
+.pio/
+
+# Captured samples
+samples/
+captures/
