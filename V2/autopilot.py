@@ -42,7 +42,7 @@ DEFAULT_AUTOPILOT_CONFIG = {
 
     # Speed on a clear straight, -1..1. 0.35 is a sensible crawl for a
     # first run; the loop is easier to debug slower than it is fast.
-    "base_throttle": 0.35,
+    "base_throttle": 0.3,
 
     # Throttle multiplier at full lock. 0.5 = half speed in the tightest
     # turn, scaled linearly with |steer| in between.

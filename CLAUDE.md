@@ -23,6 +23,7 @@ python run.py --esp-ip <ip> --quality 16 --ae-level -1   # the two framerate kno
 python run.py --flip both --framesize qvga
 
 python esp32_link_check.py --esp-ip <ip>        # why is there no video at all?
+python link_monitor.py --esp-ip <ip> --minutes 20   # what gets WORSE the longer it runs? (trend + verdict + CSV)
 python autodrive.py --dry-run                   # full loop incl. autopilot, sends nothing
 python autodrive.py --esp-ip <ip>               # drives the car (starts DISARMED, SPACE to arm)
 
@@ -40,7 +41,7 @@ python capture_esp32_samples.py --source webserver --esp-ip <ip>
 **A firmware change can be compiled without a board**, which is worth doing before every handoff — the Arduino IDE ships `arduino-cli`:
 
 ```bash
-CLI="$HOME/AppData/Local/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
+CLI="/c/Program Files/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"   # not under ~/AppData on this machine
 "$CLI" compile --fqbn esp32:esp32:esp32cam V2/firmware/esp32cam_robot
 "$CLI" compile --clean --warnings all --fqbn esp32:esp32:esp32cam V2/firmware/esp32cam_robot
 ```
@@ -188,6 +189,8 @@ Compressing harder does nothing for the last two — the frames are not too big.
 
 At that point the fix is physical, in this order: the **antenna jumper** (see below), then the **power supply** (5 V ≥1 A, short thick cable — the radio browns out before anything else does), then **distance**, then the AP's 2.4 GHz channel. Replacing the board is the last step, not the first: put it within a metre of the router and re-bench — if KB/s jumps, the board is fine.
 
+- **"Stutters more the longer it runs" is a trend question, not a `--bench` question.** `link_monitor.py` samples fps, KB/s, KB/frame, frame-gap p95, ping and the board's own `/status` health block (`uptime_s`, `heap_free`, `heap_largest`, `psram_free`, `temp_c`, `stream_frames` — added 2026-09-14, older boards show `-`) every 10 s and compares first vs last windows. Frame KB growing with KB/s flat is the sensor heating (JPEG size follows noise); KB/s falling with frame KB flat is the radio; `heap_largest` shrinking is firmware fragmentation; `uptime_s` going backwards is a reboot. The PC receiver was soaked 3 min against a local server on 2026-09-14: latency 2.5 ms and RSS flat, so it is not where the drift lives. Verified both verdict branches against a fake board that degrades on purpose.
+- **The campus/organisation WiFi throttles the board; a phone hotspot does not.** Measured 2026-09-14 with `link_monitor.py`, same board (stock CameraWebServer sketch), same PC, same room. On the organisation network (PC 10.31.160.x, board 10.2.3.x — different VLAN, TTL 63): fresh boot gives 10–12 fps / 150 KB/s for ~90 s, then collapses to 0–0.6 fps and never recovers; leaving the link idle 90 s does not help, only RST (a fresh association) does. In that state ping and `/status` (≤400 B) still answer in 5–20 ms / 0.1 s while the 6.7 KB index page — which never touches the camera — takes 1–22 s and `/capture` times out: anything larger than one TCP segment is being dropped. On the phone hotspot (both on 10.140.63.x, TTL 64): 12–15 fps / 250–300 KB/s for 10 min with occasional 1–4 s holes around minute 6–8 that cleared on their own. So "stutters more the longer it runs" on that network is per-client throttling after a burst, not the sensor, heap, firmware or Python; run the car on its own network (hotspot / travel router / PC Mobile Hotspot). A board that has just switched networks can hold the stream slot on a dead socket for minutes — `cannot open /stream: timed out` with a good ping means RST it.
 - **`ping` on Windows lies in its summary.** When the host is gone your own machine answers `Destination host unreachable`, and those count as "received, 0% loss". Read the per-reply lines. A healthy local WiFi link sits at 2–10 ms; one measured case ran min 10 / avg 72 / max 530 ms with 4% loss, which is enough for TCP to collapse to ~9 KB/s.
 - **Reboot or radio?** Write a marker the firmware only clears on boot (`/control?var=special_effect&val=2`) and poll `/status` while streaming. Marker disappears (settings back to QVGA + auto) → the board is resetting, suspect power. Marker survives but fps stays low → the radio link.
 - **AI-Thinker boards select PCB or u.FL antenna with a solder jumper.** Set to u.FL with nothing attached, the board still associates normally but throughput collapses.

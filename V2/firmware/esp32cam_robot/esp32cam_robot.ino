@@ -94,6 +94,11 @@ volatile int video_frame_interval = MIN_FRAME_INTERVAL; // Floor; tx_ready paces
 // that can broadcast-discover the PC without knowing an IP first.
 volatile bool video_udp_mode = false;
 volatile bool http_streaming = false;
+// Health counters for /status. Sampled by link_monitor.py every few seconds
+// to tell a board that degrades with uptime (heap shrinking, chip heating,
+// frames growing) from a radio link that degrades on its own.
+volatile uint32_t stream_frames_sent = 0;   // MJPEG frames handed to httpd since boot
+volatile uint32_t stream_last_len = 0;      // size of the last one, bytes
 httpd_handle_t camera_httpd = NULL;
 httpd_handle_t stream_httpd = NULL;
 
@@ -255,6 +260,10 @@ static esp_err_t http_stream_handler(httpd_req_t *req) {
     }
     if (res == ESP_OK)
       res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+    if (res == ESP_OK) {
+      stream_frames_sent++;
+      stream_last_len = fb->len;
+    }
 
     esp_camera_fb_return(fb);
     fb = NULL;
@@ -283,8 +292,13 @@ static esp_err_t http_capture_handler(httpd_req_t *req) {
 }
 
 static esp_err_t http_status_handler(httpd_req_t *req) {
+  // Any HTTP request is contact with the PC, same as an open stream. Without
+  // this, the gap between one autodrive.py run ending and the next one
+  // starting counted as "no PC" and the 120 s BEACON_TIMEOUT reboot landed
+  // right on the next run's firmware check, which then saw no answer.
+  lastServerContact = millis();
   sensor_t *s = esp_camera_sensor_get();
-  char buf[768];
+  char buf[1024];
   // "robot":1 is the marker autodrive.py checks for: it says this board has
   // motors, which the stock CameraWebServer sketch does not. Without it the
   // PC has no way to tell the two firmwares apart over HTTP.
@@ -295,7 +309,12 @@ static esp_err_t http_status_handler(httpd_req_t *req) {
       "\"ae_level\":%d,\"vflip\":%d,\"hmirror\":%d,\"special_effect\":%d,"
       "\"brightness\":%d,\"contrast\":%d,\"saturation\":%d,"
       "\"lenc\":%d,\"raw_gma\":%d,\"dcw\":%d,\"light\":%d,"
-      "\"rssi\":%d,\"pc_connected\":%d}",
+      "\"rssi\":%d,\"pc_connected\":%d,"
+      // Health block. temp_c is the ESP32's internal sensor: its absolute
+      // value is unreliable, its TREND over a session is not.
+      "\"uptime_s\":%lu,\"heap_free\":%u,\"heap_min_free\":%u,"
+      "\"heap_largest\":%u,\"psram_free\":%u,\"temp_c\":%.1f,"
+      "\"stream_frames\":%lu,\"stream_last_len\":%lu}",
       video_udp_mode ? "udp" : "mjpeg", s ? (int)s->status.framesize : -1,
       s ? s->status.quality : -1, s ? s->status.awb : -1,
       s ? s->status.awb_gain : -1, s ? s->status.aec : -1,
@@ -305,13 +324,21 @@ static esp_err_t http_status_handler(httpd_req_t *req) {
       s ? s->status.brightness : 0, s ? s->status.contrast : 0,
       s ? s->status.saturation : 0, s ? s->status.lenc : 0,
       s ? s->status.raw_gma : 0, s ? s->status.dcw : 0, oldlight, WiFi.RSSI(),
-      pcConnected ? 1 : 0);
+      pcConnected ? 1 : 0,
+      (unsigned long)(millis() / 1000),
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+      (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+      temperatureRead(),
+      (unsigned long)stream_frames_sent, (unsigned long)stream_last_len);
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   return httpd_resp_send(req, buf, n);
 }
 
 static esp_err_t http_control_handler(httpd_req_t *req) {
+  lastServerContact = millis(); // see http_status_handler
   char query[128];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     httpd_resp_send_404(req);

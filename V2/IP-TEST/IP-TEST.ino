@@ -1,7 +1,7 @@
 #include <WiFi.h>
 
-const char* ssid     = "KUWIN-IOT";
-const char* password = ""; // เว้นว่างไว้ ไม่ต้องใส่รหัสผ่าน
+const char* ssid     = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD"; // เว้นว่างไว้ ไม่ต้องใส่รหัสผ่าน
 
 void setup() {
     Serial.begin(115200);
